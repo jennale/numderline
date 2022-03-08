@@ -18,6 +18,7 @@ try:
     import psMat
     # from fontTools.misc.py23 import *
     from fontTools.ttLib import TTFont
+    from fontTools import subset
     from fontTools.feaLib.builder import addOpenTypeFeatures, Builder
 except ImportError:
     sys.stderr.write('The required FontForge and fonttools modules could not be loaded.\n\n')
@@ -57,6 +58,12 @@ def get_argparser(ArgumentParser=argparse.ArgumentParser):
     parser.add_argument('--spaceless-commas',
                         help='manipulate commas to not change the spacing, for monospace fonts, use with --add-commas',
                         default=False, action='store_true')
+    parser.add_argument('--french',
+                        help='format for french: commas are spaces, decimals are commas',
+                        default=False, action='store_true')
+    parser.add_argument('--woffs',
+                        help='generate a woff and woff2 version',
+                        default=False, action='store_true')
     parser.add_argument('--debug-annotate',
                         help='annotate glyph copies with debug digits',
                         default=False, action='store_true')
@@ -69,7 +76,7 @@ def get_argparser(ArgumentParser=argparse.ArgumentParser):
 FONT_NAME_RE = re.compile(r'^([^-]*)(?:(-.*))?$')
 NUM_DIGIT_COPIES = 7
 
-def gen_feature(digit_names, underscore_name, dot_name, do_decimals):
+def gen_feature(digit_names, underscore_name, dot_name, do_decimals, comma_name, french):
     if do_decimals:
         decimal_sub = """
     sub {dot_name} @digits' by @nd2;
@@ -83,10 +90,13 @@ def gen_feature(digit_names, underscore_name, dot_name, do_decimals):
     else:
         decimal_sub = """
     ignore sub {dot_name} @digits';
+    {comma_sub}
+
     sub @digits @digits' by @digits;
 """
-
-    decimal_sub = decimal_sub.format(dot_name=dot_name)
+        # For french languages, the decimal and commas should both be considered decimal values. 
+        decimal_sub = decimal_sub.format(dot_name=dot_name,comma_sub="ignore sub "+ comma_name +" @digits';" if french else "")
+    
 
     feature = """
 languagesystem DFLT dflt;
@@ -160,10 +170,11 @@ def annotate_glyph(glyph, extra_glyph):
     layer.transform(mat)
     glyph.layers[1] += layer
 
-def out_path(name):
-    return 'out/{0}.ttf'.format(name)
+def out_path(name, file_format='ttf', french=False):
+    suffix = '-FR' if french else ''
+    return 'out/{0}{1}.{2}'.format(name, suffix, file_format)
 
-def patch_one_font(font, rename_font, add_underlines, shift_amount, squish, squish_all, add_commas, spaceless_commas, debug_annotate, do_decimals, group, sub_font):
+def patch_one_font(font, rename_font, add_underlines, shift_amount, squish, squish_all, add_commas, spaceless_commas, debug_annotate, do_decimals, group, sub_font, french, woffs):
     font.encoding = 'ISO10646'
 
     if group:
@@ -211,10 +222,27 @@ def patch_one_font(font, rename_font, add_underlines, shift_amount, squish, squi
         font.appendSFNTName(
             'English (US)', 'Compatible Full', font.fullname)
 
+    decimal_char = '.'
+    comma_char = ','
+
+    if french:
+        # decimal_char = ','
+        comma_char = ' '
+
+        # Replace the period glyph with a comma for french. Makes 11.1 look like 11,1
+        fontforge.activeFont().selection.select("comma")
+        font.copy()
+        fontforge.activeFont().selection.select("period")
+        font.paste()
+
+
     digit_names = [font[code].glyphname for code in range(ord('0'),ord('9')+1)]
-    test_names = [font[code].glyphname for code in range(ord('A'),ord('J')+1)]
+    # test_names = [font[code].glyphname for code in range(ord('A'),ord('J')+1)]
+
     underscore_name = font[ord('_')].glyphname
-    dot_name = font[ord('.')].glyphname
+    dot_name = font[ord(decimal_char)].glyphname
+    comma_name = font[ord(',')].glyphname
+ 
     # print(digit_names)
 
     if sub_font is not None:
@@ -241,7 +269,7 @@ def patch_one_font(font, rename_font, add_underlines, shift_amount, squish, squi
         if add_underscore:
             glyph.layers[1] += underscore_layer
         if add_comma:
-            add_comma_to(glyph, font[ord(',')], spaceless_commas)
+            add_comma_to(glyph, font[ord(comma_char)], spaceless_commas)
         if annotate_with is not None:
             annotate_glyph(glyph, annotate_with)
         encoding_alloc[0] += 1
@@ -266,15 +294,28 @@ def patch_one_font(font, rename_font, add_underlines, shift_amount, squish, squi
             glyph = font[digit]
             glyph.layers[1] = squish_layer(glyph.layers[1], squish)
 
-    gen_feature(digit_names, underscore_name, dot_name, do_decimals)
+    gen_feature(digit_names, underscore_name, dot_name, do_decimals, comma_name, french)
+
+
+    # replacement to comply with SIL Open Font License
+    font.familyname = font.familyname.replace('Source Sans Pro', 'Src Sans Numeric')
+    font.fontname = font.fontname.replace('SourceSansPro', 'SrcSansNumeric')
+    out_name = font.fullname.replace('Source Sans Pro', 'Src Sans Numeric')
+    out_name = out_name.replace(' ','-')
 
     font.generate('out/tmp.ttf')
+
     ft_font = TTFont('out/tmp.ttf')
     addOpenTypeFeatures(ft_font, 'mods.fea', tables=['GSUB'])
-    # replacement to comply with SIL Open Font License
-    out_name = font.fullname.replace('Source ', 'Sauce ')
-    ft_font.save(out_path(out_name))
-    print("> Created '{}'".format(out_name))
+    
+    ft_font.save(out_path(out_name, 'ttf', french))
+
+    if woffs: 
+        ft_font.flavor = 'woff'
+        ft_font.save(out_path(out_name, 'woff', french))
+        ft_font.flavor = 'woff2'
+        ft_font.save(out_path(out_name, 'woff2', french))
+    print("> Created '{0}'{1}".format(out_name,' (french)' if french else ''))
 
     if sub_font is not None:
         sub_font.close()
@@ -286,6 +327,7 @@ def patch_fonts(target_files, *args):
     res = None
     for target_file in target_files:
         target_font = fontforge.open(target_file.name)
+
         try:
             res = patch_one_font(target_font, *args)
         finally:
@@ -370,7 +412,7 @@ def main(argv):
         return
 
     return patch_fonts(args.target_fonts, args.rename_font, args.add_underlines, args.shift_amount, args.squish, args.squish_all,
-        args.add_commas, args.spaceless_commas, args.debug_annotate, args.do_decimals, args.group, args.sub_font)
+        args.add_commas, args.spaceless_commas, args.debug_annotate, args.do_decimals, args.group, args.sub_font, args.french, args.woffs)
 
 
 main(sys.argv[1:])
